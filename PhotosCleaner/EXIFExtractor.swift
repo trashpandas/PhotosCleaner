@@ -85,8 +85,58 @@ enum EXIFExtractor {
 
     // MARK: - EXIF Parsing
 
+    // MARK: - Filesystem API
+
+    /// Extract EXIF metadata from a file URL on disk (filesystem photos).
+    /// Wraps the internal parseEXIF on a background queue.
+    static func extractFromFile(at url: URL, completion: @escaping (EXIFData) -> Void) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            let exif = parseEXIF(from: url)
+            completion(exif)
+        }
+    }
+
+    /// Classify a filesystem photo's source using filename heuristics and EXIF data.
+    /// No PHAsset.mediaSubtypes available, so we rely on filename patterns and EXIF fields.
+    static func classifySourceFromFile(filename: String, exif: EXIFData) -> SourceClassification {
+        let lower = filename.lowercased()
+
+        // Screenshot detection via filename
+        if lower.hasPrefix("screenshot") ||
+           lower.contains("screen shot") ||
+           lower.hasPrefix("scr_") ||
+           lower.contains("截屏") ||
+           lower.contains("bildschirmfoto") {
+            return .screenshot
+        }
+
+        // Panorama detection via filename
+        if lower.contains("pano") || lower.contains("panorama") {
+            return .panorama
+        }
+
+        // Camera photo: has camera Make + Model in EXIF
+        if exif.make != nil && exif.model != nil {
+            return .cameraPhoto
+        }
+
+        // Has partial camera info — likely edited or processed
+        if exif.make != nil || exif.model != nil {
+            return .editedPhoto
+        }
+
+        // No camera EXIF at all — likely saved from the web or a messaging app
+        if !exif.hasCameraInfo && exif.dateTimeOriginal == nil && exif.gps == nil {
+            return .webSavedImage
+        }
+
+        return .unknown
+    }
+
+    // MARK: - EXIF Parsing
+
     /// Read EXIF from a file URL using ImageIO (no pixel decode — just metadata).
-    private static func parseEXIF(from url: URL) -> EXIFData {
+    static func parseEXIF(from url: URL) -> EXIFData {
         guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
               let props = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [String: Any]
         else {

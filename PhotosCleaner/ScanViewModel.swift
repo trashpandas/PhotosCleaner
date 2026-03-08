@@ -19,6 +19,7 @@
 import Foundation
 import Photos
 import Vision
+import AppKit
 
 // MARK: - Errors
 
@@ -40,12 +41,14 @@ enum AppError: LocalizedError {
 
 enum ScanPhase: String {
     case idle                   = "Idle"
-    case classifying            = "Phase 1/5: Basic Classification"
-    case extractingEXIF         = "Phase 2/5: Reading EXIF Metadata"
-    case classifyingSources     = "Phase 3/5: Classifying Sources"
-    case generatingFingerprints = "Phase 4/5: Generating Fingerprints"
-    case detectingDuplicates    = "Phase 5/5: Detecting Duplicates"
+    case enumeratingFolder      = "Phase 0/6: Scanning Folder"
+    case classifying            = "Phase 1/6: Basic Classification"
+    case extractingEXIF         = "Phase 2/6: Reading EXIF Metadata"
+    case classifyingSources     = "Phase 3/6: Classifying Sources"
+    case generatingFingerprints = "Phase 4/6: Generating Fingerprints"
+    case detectingDuplicates    = "Phase 5/6: Detecting Duplicates"
     case complete               = "Scan Complete"
+    case cancelled              = "Scan Stopped"
 }
 
 // MARK: - ViewModel
@@ -66,8 +69,14 @@ class ScanViewModel: ObservableObject {
     /// Skip fingerprinting & duplicate detection for a faster scan.
     @Published var skipFingerprinting: Bool = false
 
+    // ── Source selection (v3) ─────────────────────────────────────────────
+    @Published var scanPhotoKit: Bool = true
+    @Published var scanFileSystem: Bool = false
+    @Published var selectedFolderURL: URL? = nil
+    @Published var folderPhotoCount: Int = 0
+
     // ── Results ─────────────────────────────────────────────────────────────
-    @Published var allItems        = [PhotoItem]()   // Every photo in the library
+    @Published var allItems        = [PhotoItem]()   // Every photo scanned
     @Published var flaggedItems    = [PhotoItem]()   // Items with non-empty reasons
     @Published var tallyRows       = [TallyRow]()
 
@@ -81,9 +90,24 @@ class ScanViewModel: ObservableObject {
     // Fingerprint storage (in-memory only)
     private var fingerprints = [String: VNFeaturePrintObservation]()
 
+    // Cancellation flag — thread-safe via NSLock
+    private var _cancelled = false
+    private let cancelLock = NSLock()
+
+    private var isCancelled: Bool {
+        get { cancelLock.lock(); defer { cancelLock.unlock() }; return _cancelled }
+        set { cancelLock.lock(); _cancelled = newValue; cancelLock.unlock() }
+    }
+
+    // Asset map for PhotoKit photos (needed for image loading and deletion)
+    private var assetMap = [String: PHAsset]()
+
+    // File URLs discovered during folder enumeration (v3)
+    private var folderImageURLs = [URL]()
+
     // Convenience computed properties
     var isScanning: Bool {
-        scanPhase != .idle && scanPhase != .complete
+        scanPhase != .idle && scanPhase != .complete && scanPhase != .cancelled
     }
 
     var scanComplete: Bool {
@@ -105,162 +129,329 @@ class ScanViewModel: ObservableObject {
         }
     }
 
+    // ── Stop Scan ─────────────────────────────────────────────────────────
+
+    func stopScan() {
+        isCancelled = true
+    }
+
+    /// Called from background threads to check cancellation and transition to cancelled state.
+    private func handleCancellation(partialItems: [PhotoItem] = [], partialTallies: [TallyRow] = []) {
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            if !partialItems.isEmpty {
+                self.allItems     = partialItems
+                self.flaggedItems = partialItems.filter { !$0.reasons.isEmpty }
+            }
+            if !partialTallies.isEmpty {
+                self.tallyRows = partialTallies
+            }
+            let phase = self.scanPhase.rawValue
+            self.scanPhase     = .cancelled
+            self.statusMessage = "Scan stopped during \(phase). Partial results shown for \(self.allItems.count.formatted()) photos."
+            self.progress      = 0
+        }
+    }
+
     // ── Scan Entry Point ────────────────────────────────────────────────────
 
     func startScan() {
-        let authorized = authStatus == .authorized || authStatus == .limited
-        guard authorized else {
-            requestAuthorization { [weak self] status in
-                if status == .authorized || status == .limited {
-                    self?.startScan()
-                } else {
-                    self?.errorMessage = AppError.photosAccessDenied.errorDescription
-                }
-            }
+        // Need at least one source selected
+        guard scanPhotoKit || scanFileSystem else {
+            errorMessage = "Please select at least one source to scan (Photos Library or Folder)."
             return
         }
 
-        // Reset state
-        scanPhase         = .classifying
-        allItems          = []
-        flaggedItems      = []
-        tallyRows         = []
-        categoryTallies   = []
-        sourceTallies     = []
-        duplicateGroups   = []
-        cameraBreakdown   = []
-        locationBreakdown = []
-        fingerprints      = [:]
-        progress          = 0
-        scannedCount      = 0
-        errorMessage      = nil
-
-        let fetchOptions = PHFetchOptions()
-        fetchOptions.includeHiddenAssets   = false
-        fetchOptions.includeAllBurstAssets = false
-
-        let result = PHAsset.fetchAssets(with: .image, options: fetchOptions)
-        let total  = result.count
-        totalCount = total
-        statusMessage = "Phase 1/5 — Classifying \(total.formatted()) photos…"
-
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            self?.phase1Classify(result: result, total: total)
+        // If scanning PhotoKit, ensure authorization
+        if scanPhotoKit {
+            let authorized = authStatus == .authorized || authStatus == .limited
+            guard authorized else {
+                requestAuthorization { [weak self] status in
+                    if status == .authorized || status == .limited {
+                        self?.startScan()
+                    } else {
+                        self?.errorMessage = AppError.photosAccessDenied.errorDescription
+                    }
+                }
+                return
+            }
         }
+
+        // Reset state
+        isCancelled        = false
+        allItems           = []
+        flaggedItems       = []
+        tallyRows          = []
+        categoryTallies    = []
+        sourceTallies      = []
+        duplicateGroups    = []
+        cameraBreakdown    = []
+        locationBreakdown  = []
+        fingerprints       = [:]
+        assetMap           = [:]
+        folderImageURLs    = []
+        folderPhotoCount   = 0
+        progress           = 0
+        scannedCount       = 0
+        totalCount         = 0
+        errorMessage       = nil
+
+        // Clear thumbnail cache for fresh scan
+        ThumbnailCache.shared.clear()
+
+        // Start with folder enumeration if filesystem scanning is enabled
+        if scanFileSystem, let folderURL = selectedFolderURL {
+            scanPhase     = .enumeratingFolder
+            statusMessage = "Phase 0/6 — Scanning folder…"
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                self?.phase0EnumerateFolder(folderURL: folderURL)
+            }
+        } else {
+            // Skip straight to Phase 1
+            scanPhase     = .classifying
+            statusMessage = "Phase 1/6 — Classifying photos…"
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                self?.phase1Classify()
+            }
+        }
+    }
+
+    // ── Phase 0: Folder Enumeration (v3) ─────────────────────────────────
+
+    private func phase0EnumerateFolder(folderURL: URL) {
+        let urls = FileSystemScanner.enumerateImages(in: folderURL)
+
+        if isCancelled {
+            handleCancellation()
+            return
+        }
+
+        folderImageURLs = urls
+
+        DispatchQueue.main.async { [weak self] in
+            self?.folderPhotoCount = urls.count
+            self?.statusMessage = "Found \(urls.count.formatted()) images in folder. Starting classification…"
+        }
+
+        // Continue to Phase 1
+        DispatchQueue.main.async { [weak self] in
+            self?.scanPhase     = .classifying
+            self?.statusMessage = "Phase 1/6 — Classifying photos…"
+        }
+
+        phase1Classify()
     }
 
     // ── Phase 1: Basic Classification ───────────────────────────────────────
 
-    private func phase1Classify(result: PHFetchResult<PHAsset>, total: Int) {
+    private func phase1Classify() {
         var items = [PhotoItem]()
         var tally = [String: Int]()
-        var assetMap = [String: PHAsset]()
 
-        result.enumerateObjects { asset, index, _ in
-            let reasons = Self.classify(asset)
-            let filename = PHAssetResource.assetResources(for: asset)
-                .first?.originalFilename ?? asset.localIdentifier
+        // 1a. PhotoKit photos
+        if scanPhotoKit {
+            let fetchOptions = PHFetchOptions()
+            fetchOptions.includeHiddenAssets   = false
+            fetchOptions.includeAllBurstAssets = false
+
+            let result = PHAsset.fetchAssets(with: .image, options: fetchOptions)
+
+            result.enumerateObjects { [weak self] asset, index, stop in
+                if self?.isCancelled == true {
+                    stop.pointee = true
+                    return
+                }
+                let reasons = Self.classify(asset)
+                let filename = PHAssetResource.assetResources(for: asset)
+                    .first?.originalFilename ?? asset.localIdentifier
+
+                let item = PhotoItem(
+                    id:       asset.localIdentifier,
+                    filename: filename,
+                    date:     asset.creationDate,
+                    width:    asset.pixelWidth,
+                    height:   asset.pixelHeight,
+                    reasons:  reasons,
+                    photoSource: .photoKit
+                )
+                items.append(item)
+                self?.assetMap[asset.localIdentifier] = asset
+
+                for r in reasons {
+                    let key = r.components(separatedBy: " (").first ?? r
+                    tally[key, default: 0] += 1
+                }
+            }
+        }
+
+        if isCancelled {
+            let sortedTally = tally.sorted { $0.value > $1.value }.map { TallyRow(reason: $0.key, count: $0.value) }
+            handleCancellation(partialItems: items, partialTallies: sortedTally)
+            return
+        }
+
+        // 1b. Filesystem photos
+        for (index, url) in folderImageURLs.enumerated() {
+            if isCancelled { break }
+
+            let meta = FileSystemScanner.loadImageMetadata(from: url)
+            let filename = url.lastPathComponent
+            let reasons = FileSystemScanner.classifyFileSystemImage(
+                filename: filename, width: meta.width, height: meta.height
+            )
 
             let item = PhotoItem(
-                id:       asset.localIdentifier,
+                id:       url.absoluteString,
                 filename: filename,
-                date:     asset.creationDate,
-                width:    asset.pixelWidth,
-                height:   asset.pixelHeight,
-                reasons:  reasons
+                date:     meta.date,
+                width:    meta.width,
+                height:   meta.height,
+                reasons:  reasons,
+                photoSource: .fileSystem,
+                fileURL:  url
             )
             items.append(item)
-            assetMap[asset.localIdentifier] = asset
 
             for r in reasons {
                 let key = r.components(separatedBy: " (").first ?? r
                 tally[key, default: 0] += 1
             }
 
-            if index % 50 == 0 || index == total - 1 {
-                let p = Double(index + 1) / Double(max(total, 1))
-                let c = index + 1
+            if index % 50 == 0 {
+                let c = items.count
                 DispatchQueue.main.async { [weak self] in
-                    self?.progress     = p
                     self?.scannedCount = c
                 }
             }
         }
 
+        let total = items.count
         let sortedTally = tally
             .sorted { $0.value > $1.value }
             .map { TallyRow(reason: $0.key, count: $0.value) }
 
+        if isCancelled {
+            handleCancellation(partialItems: items, partialTallies: sortedTally)
+            return
+        }
+
         DispatchQueue.main.async { [weak self] in
+            self?.totalCount   = total
             self?.allItems     = items
             self?.flaggedItems = items.filter { !$0.reasons.isEmpty }
             self?.tallyRows    = sortedTally
+            self?.progress     = 1.0
+            self?.scannedCount = total
+            self?.statusMessage = "Phase 1/6 — Classified \(total.formatted()) photos."
         }
 
-        phase2ExtractEXIF(items: items, assetMap: assetMap, total: total)
+        phase2ExtractEXIF(items: items, total: total)
     }
 
     // ── Phase 2: EXIF Metadata Extraction ───────────────────────────────────
 
-    private func phase2ExtractEXIF(items: [PhotoItem], assetMap: [String: PHAsset], total: Int) {
+    private func phase2ExtractEXIF(items: [PhotoItem], total: Int) {
         DispatchQueue.main.async { [weak self] in
             self?.scanPhase     = .extractingEXIF
-            self?.statusMessage = "Phase 2/5 — Reading EXIF metadata…"
+            self?.statusMessage = "Phase 2/6 — Reading EXIF metadata…"
             self?.progress      = 0
             self?.scannedCount  = 0
         }
 
         var updated   = items
-        let semaphore = DispatchSemaphore(value: 6)
+        let semaphore = DispatchSemaphore(value: HardwareAdaptor.exifConcurrency)
         let group     = DispatchGroup()
         let lock      = NSLock()
         var completed = 0
 
         for i in 0..<updated.count {
-            guard let asset = assetMap[updated[i].id] else { continue }
+            if isCancelled { break }
 
             semaphore.wait()
             group.enter()
 
-            EXIFExtractor.extract(from: asset) { exif in
-                lock.lock()
-                updated[i].exif = exif
-                completed += 1
-                let c = completed
-                lock.unlock()
+            let item = updated[i]
 
-                semaphore.signal()
-                group.leave()
+            if item.photoSource == .photoKit, let asset = assetMap[item.id] {
+                // PhotoKit path
+                EXIFExtractor.extract(from: asset) { exif in
+                    lock.lock()
+                    updated[i].exif = exif
+                    completed += 1
+                    let c = completed
+                    lock.unlock()
 
-                if c % 50 == 0 || c == total {
-                    let p = Double(c) / Double(max(total, 1))
-                    DispatchQueue.main.async { [weak self] in
-                        self?.progress     = p
-                        self?.scannedCount = c
+                    semaphore.signal()
+                    group.leave()
+
+                    if c % 50 == 0 || c == total {
+                        let p = Double(c) / Double(max(total, 1))
+                        DispatchQueue.main.async { [weak self] in
+                            self?.progress     = p
+                            self?.scannedCount = c
+                        }
                     }
                 }
+            } else if item.photoSource == .fileSystem, let url = item.fileURL {
+                // Filesystem path
+                EXIFExtractor.extractFromFile(at: url) { exif in
+                    lock.lock()
+                    updated[i].exif = exif
+                    completed += 1
+                    let c = completed
+                    lock.unlock()
+
+                    semaphore.signal()
+                    group.leave()
+
+                    if c % 50 == 0 || c == total {
+                        let p = Double(c) / Double(max(total, 1))
+                        DispatchQueue.main.async { [weak self] in
+                            self?.progress     = p
+                            self?.scannedCount = c
+                        }
+                    }
+                }
+            } else {
+                lock.lock()
+                completed += 1
+                lock.unlock()
+                semaphore.signal()
+                group.leave()
             }
         }
 
         group.wait()
-        phase3ClassifySources(items: updated, assetMap: assetMap, total: total)
+
+        if isCancelled {
+            handleCancellation(partialItems: updated)
+            return
+        }
+
+        phase3ClassifySources(items: updated, total: total)
     }
 
     // ── Phase 3: Source Classification ───────────────────────────────────────
 
-    private func phase3ClassifySources(items: [PhotoItem], assetMap: [String: PHAsset], total: Int) {
+    private func phase3ClassifySources(items: [PhotoItem], total: Int) {
         DispatchQueue.main.async { [weak self] in
             self?.scanPhase     = .classifyingSources
-            self?.statusMessage = "Phase 3/5 — Classifying photo sources…"
+            self?.statusMessage = "Phase 3/6 — Classifying photo sources…"
             self?.progress      = 0
         }
 
         var updated = items
 
         for i in 0..<updated.count {
-            if let asset = assetMap[updated[i].id] {
+            if isCancelled { break }
+
+            if updated[i].photoSource == .photoKit, let asset = assetMap[updated[i].id] {
                 updated[i].sourceClassification = EXIFExtractor.classifySource(
                     asset: asset, exif: updated[i].exif
+                )
+            } else if updated[i].photoSource == .fileSystem {
+                updated[i].sourceClassification = EXIFExtractor.classifySourceFromFile(
+                    filename: updated[i].filename, exif: updated[i].exif
                 )
             }
 
@@ -271,6 +462,11 @@ class ScanViewModel: ObservableObject {
                     self?.scannedCount = i + 1
                 }
             }
+        }
+
+        if isCancelled {
+            handleCancellation(partialItems: updated)
+            return
         }
 
         let sTallies = CategoryAnalyzer.sourceBreakdown(updated)
@@ -293,58 +489,97 @@ class ScanViewModel: ObservableObject {
         if skip {
             phaseFinalCategorize(items: updated)
         } else {
-            phase4GenerateFingerprints(items: updated, assetMap: assetMap, total: total)
+            phase4GenerateFingerprints(items: updated, total: total)
         }
     }
 
     // ── Phase 4: Fingerprint Generation ─────────────────────────────────────
 
-    private func phase4GenerateFingerprints(items: [PhotoItem], assetMap: [String: PHAsset], total: Int) {
+    private func phase4GenerateFingerprints(items: [PhotoItem], total: Int) {
         DispatchQueue.main.async { [weak self] in
             self?.scanPhase     = .generatingFingerprints
-            self?.statusMessage = "Phase 4/5 — Generating perceptual fingerprints (this may take a while)…"
+            self?.statusMessage = "Phase 4/6 — Generating perceptual fingerprints (this may take a while)…"
             self?.progress      = 0
             self?.scannedCount  = 0
         }
 
-        let semaphore = DispatchSemaphore(value: 4)
+        let semaphore = DispatchSemaphore(value: HardwareAdaptor.fingerprintConcurrency)
         let group     = DispatchGroup()
         let lock      = NSLock()
         var fpMap     = [String: VNFeaturePrintObservation]()
         var completed = 0
 
         for item in items {
-            guard let asset = assetMap[item.id] else { continue }
+            if isCancelled { break }
 
             semaphore.wait()
             group.enter()
 
-            DuplicateDetector.generateFingerprint(for: asset) { [weak self] observation in
-                if let obs = observation {
+            if item.photoSource == .photoKit, let asset = assetMap[item.id] {
+                // PhotoKit path
+                DuplicateDetector.generateFingerprint(for: asset) { [weak self] observation in
+                    if let obs = observation {
+                        lock.lock()
+                        fpMap[item.id] = obs
+                        lock.unlock()
+                    }
+
                     lock.lock()
-                    fpMap[item.id] = obs
+                    completed += 1
+                    let c = completed
                     lock.unlock()
-                }
 
-                lock.lock()
-                completed += 1
-                let c = completed
-                lock.unlock()
+                    semaphore.signal()
+                    group.leave()
 
-                semaphore.signal()
-                group.leave()
-
-                if c % 20 == 0 || c == total {
-                    let p = Double(c) / Double(max(total, 1))
-                    DispatchQueue.main.async {
-                        self?.progress     = p
-                        self?.scannedCount = c
+                    if c % 20 == 0 || c == total {
+                        let p = Double(c) / Double(max(total, 1))
+                        DispatchQueue.main.async {
+                            self?.progress     = p
+                            self?.scannedCount = c
+                        }
                     }
                 }
+            } else if item.photoSource == .fileSystem, let url = item.fileURL {
+                // Filesystem path
+                DuplicateDetector.generateFingerprintFromFile(at: url) { [weak self] observation in
+                    if let obs = observation {
+                        lock.lock()
+                        fpMap[item.id] = obs
+                        lock.unlock()
+                    }
+
+                    lock.lock()
+                    completed += 1
+                    let c = completed
+                    lock.unlock()
+
+                    semaphore.signal()
+                    group.leave()
+
+                    if c % 20 == 0 || c == total {
+                        let p = Double(c) / Double(max(total, 1))
+                        DispatchQueue.main.async {
+                            self?.progress     = p
+                            self?.scannedCount = c
+                        }
+                    }
+                }
+            } else {
+                lock.lock()
+                completed += 1
+                lock.unlock()
+                semaphore.signal()
+                group.leave()
             }
         }
 
         group.wait()
+
+        if isCancelled {
+            handleCancellation(partialItems: items)
+            return
+        }
 
         DispatchQueue.main.async { [weak self] in
             self?.fingerprints = fpMap
@@ -358,7 +593,7 @@ class ScanViewModel: ObservableObject {
     private func phase5DetectDuplicates(items: [PhotoItem], fingerprints fpMap: [String: VNFeaturePrintObservation]) {
         DispatchQueue.main.async { [weak self] in
             self?.scanPhase     = .detectingDuplicates
-            self?.statusMessage = "Phase 5/5 — Comparing fingerprints for duplicates…"
+            self?.statusMessage = "Phase 5/6 — Comparing fingerprints for duplicates…"
             self?.progress      = 0
         }
 
@@ -390,8 +625,6 @@ class ScanViewModel: ObservableObject {
     private func phaseFinalCategorize(items: [PhotoItem]) {
         let (categorized, catTallies) = CategoryAnalyzer.categorizeAll(items)
 
-        // Reverse-geocode unique GPS clusters (up to 50) for the Locations tab.
-        // Cluster by rounding to ~0.01° (~1 km), then geocode one representative per cluster.
         reverseGeocodeLocations(categorized) { [weak self] geoItems in
             let locBreak = CategoryAnalyzer.locationBreakdown(geoItems)
 
@@ -408,23 +641,27 @@ class ScanViewModel: ObservableObject {
                 let dupCount  = self.duplicateGroups.count
                 let flagCount = self.flaggedItems.count
 
+                // Build status message with source breakdown
+                var sourceParts = [String]()
+                let photoKitCount = geoItems.filter { $0.photoSource == .photoKit }.count
+                let folderCount   = geoItems.filter { $0.photoSource == .fileSystem }.count
+                if photoKitCount > 0 { sourceParts.append("\(photoKitCount.formatted()) from Photos") }
+                if folderCount > 0   { sourceParts.append("\(folderCount.formatted()) from folder") }
+
                 if flagCount == 0 && dupCount == 0 {
-                    self.statusMessage = "Scan complete — your library looks clean!"
+                    self.statusMessage = "Scan complete (\(sourceParts.joined(separator: ", "))) — your library looks clean!"
                 } else {
                     var parts = [String]()
                     if flagCount > 0  { parts.append("\(flagCount.formatted()) flagged items") }
                     if dupCount > 0   { parts.append("\(dupCount.formatted()) duplicate groups") }
-                    self.statusMessage = "Scan complete. Found \(parts.joined(separator: " and ")) out of \(categorized.count.formatted()) photos."
+                    self.statusMessage = "Scan complete. Found \(parts.joined(separator: " and ")) out of \(categorized.count.formatted()) photos (\(sourceParts.joined(separator: ", ")))."
                 }
             }
         }
     }
 
     /// Reverse-geocode GPS coordinates for location grouping.
-    /// Clusters coordinates by ~1 km grid cells, geocodes up to 50 unique clusters,
-    /// then applies the location name to all items in each cluster.
     private func reverseGeocodeLocations(_ items: [PhotoItem], completion: @escaping ([PhotoItem]) -> Void) {
-        // Build clusters: round lat/lon to 0.01° (~1 km) grid
         struct GridKey: Hashable {
             let latBucket: Int
             let lonBucket: Int
@@ -445,7 +682,6 @@ class ScanViewModel: ObservableObject {
             }
         }
 
-        // Limit to 50 most-populated clusters to avoid rate limiting
         let topClusters = clusters.values
             .sorted { $0.indices.count > $1.indices.count }
             .prefix(50)
@@ -508,7 +744,11 @@ class ScanViewModel: ObservableObject {
     // ── Album creation ──────────────────────────────────────────────────────
 
     func createAlbum(completion: @escaping (Result<Int, Error>) -> Void) {
-        let identifiers = flaggedItems.map { $0.id }
+        let identifiers = flaggedItems.compactMap { $0.photoSource == .photoKit ? $0.id : nil }
+        guard !identifiers.isEmpty else {
+            completion(.success(0))
+            return
+        }
         var collectionID: String?
 
         PHPhotoLibrary.shared().performChanges({
@@ -578,33 +818,87 @@ class ScanViewModel: ObservableObject {
     }
 
     func processPendingDeletions(completion: @escaping (Result<Int, Error>) -> Void) {
-        let ids = pendingDeletions.map { $0.id }
-        guard !ids.isEmpty else {
+        guard !pendingDeletions.isEmpty else {
             completion(.success(0))
             return
         }
         batchProcessing = true
-        let assets = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil)
-        PHPhotoLibrary.shared().performChanges({
-            PHAssetChangeRequest.deleteAssets(assets)
-        }) { [weak self] _, error in
+
+        // Split by source
+        let photoKitItems = pendingDeletions.filter { $0.photoSource == .photoKit }
+        let fileSystemItems = pendingDeletions.filter { $0.photoSource == .fileSystem }
+
+        let group = DispatchGroup()
+        let lock = NSLock()
+        var deletedCount = 0
+        var lastError: Error? = nil
+
+        // Delete PhotoKit items
+        if !photoKitItems.isEmpty {
+            group.enter()
+            let ids = photoKitItems.map { $0.id }
+            let assets = PHAsset.fetchAssets(withLocalIdentifiers: ids, options: nil)
+            PHPhotoLibrary.shared().performChanges({
+                PHAssetChangeRequest.deleteAssets(assets)
+            }) { _, error in
+                lock.lock()
+                if let error {
+                    lastError = error
+                } else {
+                    deletedCount += ids.count
+                }
+                lock.unlock()
+                group.leave()
+            }
+        }
+
+        // Delete filesystem items (move to Trash)
+        if !fileSystemItems.isEmpty {
+            group.enter()
+            DispatchQueue.global(qos: .userInitiated).async {
+                for item in fileSystemItems {
+                    guard let url = item.fileURL else { continue }
+                    NSWorkspace.shared.recycle([url]) { trashedURLs, error in
+                        lock.lock()
+                        if error != nil {
+                            lastError = error
+                        } else {
+                            deletedCount += 1
+                        }
+                        lock.unlock()
+                    }
+                }
+                group.leave()
+            }
+        }
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            group.wait()
             DispatchQueue.main.async {
                 self?.batchProcessing = false
-                if let error { completion(.failure(error)) }
-                else {
-                    let count = ids.count
+                if let error = lastError, deletedCount == 0 {
+                    completion(.failure(error))
+                } else {
                     self?.pendingDeletions = []
-                    completion(.success(count))
+                    completion(.success(deletedCount))
                 }
             }
         }
     }
 
     func keepItem(_ item: PhotoItem, completion: @escaping (Error?) -> Void) {
+        guard item.photoSource == .photoKit else {
+            completion(nil)  // No album for filesystem items
+            return
+        }
         addToAlbum(named: "Reviewed: Keep", assetID: item.id, completion: completion)
     }
 
     func moveItem(_ item: PhotoItem, toAlbumNamed name: String, completion: @escaping (Error?) -> Void) {
+        guard item.photoSource == .photoKit else {
+            completion(nil)  // No album for filesystem items
+            return
+        }
         addToAlbum(named: name, assetID: item.id, completion: completion)
     }
 
@@ -653,7 +947,7 @@ class ScanViewModel: ObservableObject {
     // ── CSV export ──────────────────────────────────────────────────────────
 
     func csvContent() -> String {
-        var lines = ["Filename,Date,Reasons,Width,Height,Source,Camera,Category,Duplicate"]
+        var lines = ["Filename,Date,Reasons,Width,Height,Source,Camera,Category,Duplicate,PhotoSource"]
         for item in allItems {
             let fields = [
                 item.filename,
@@ -664,7 +958,8 @@ class ScanViewModel: ObservableObject {
                 item.sourceClassification.rawValue,
                 item.cameraDescription,
                 item.contentCategory.rawValue,
-                item.isDuplicate ? "Yes" : "No"
+                item.isDuplicate ? "Yes" : "No",
+                item.photoSource.rawValue
             ].map { "\"" + $0.replacingOccurrences(of: "\"", with: "\"\"") + "\"" }
             lines.append(fields.joined(separator: ","))
         }

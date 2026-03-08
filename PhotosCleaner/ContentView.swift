@@ -43,6 +43,7 @@ struct ContentView: View {
         VStack(spacing: 0) {
             headerBar
             scanControlBar
+            sourceSelectionBar
             Divider()
 
             if vm.scanPhase == .idle {
@@ -85,7 +86,7 @@ struct ContentView: View {
                 .font(.title3.bold())
                 .foregroundColor(.white)
             Spacer()
-            Text("v2.0")
+            Text("v3.0")
                 .font(.caption)
                 .foregroundColor(Color.white.opacity(0.5))
         }
@@ -106,6 +107,17 @@ struct ContentView: View {
             }
             .buttonStyle(.borderedProminent)
             .disabled(vm.isScanning)
+
+            if vm.isScanning {
+                Button {
+                    vm.stopScan()
+                } label: {
+                    Label("Stop Scan", systemImage: "stop.fill")
+                        .frame(minWidth: 100)
+                }
+                .buttonStyle(.borderedProminent)
+                .tint(.red)
+            }
 
             Toggle(isOn: $vm.skipFingerprinting) {
                 Label("Quick Scan", systemImage: "hare.fill")
@@ -133,6 +145,90 @@ struct ContentView: View {
         .background(Color(NSColor.controlBackgroundColor))
     }
 
+    // MARK: - Source Selection Bar (v3)
+
+    var sourceSelectionBar: some View {
+        HStack(spacing: 16) {
+            Text("Scan Sources:")
+                .font(.caption.weight(.semibold))
+                .foregroundColor(.secondary)
+
+            Toggle(isOn: $vm.scanPhotoKit) {
+                Label("Photos Library", systemImage: "photo.on.rectangle")
+                    .font(.caption)
+            }
+            .toggleStyle(.checkbox)
+            .disabled(vm.isScanning)
+
+            Divider()
+                .frame(height: 16)
+
+            Toggle(isOn: $vm.scanFileSystem) {
+                Label("Folder", systemImage: "folder")
+                    .font(.caption)
+            }
+            .toggleStyle(.checkbox)
+            .disabled(vm.isScanning)
+
+            if vm.scanFileSystem {
+                if let url = vm.selectedFolderURL {
+                    HStack(spacing: 6) {
+                        Image(systemName: "folder.fill")
+                            .foregroundColor(.blue)
+                            .font(.caption)
+                        Text(url.lastPathComponent)
+                            .font(.caption)
+                            .lineLimit(1)
+                            .help(url.path)
+                        Button {
+                            vm.selectedFolderURL = nil
+                            vm.scanFileSystem    = false
+                        } label: {
+                            Image(systemName: "xmark.circle.fill")
+                                .foregroundColor(.secondary)
+                                .font(.caption)
+                        }
+                        .buttonStyle(.plain)
+                        .disabled(vm.isScanning)
+                    }
+                } else {
+                    Button("Browse…") {
+                        pickFolder()
+                    }
+                    .font(.caption)
+                    .disabled(vm.isScanning)
+                }
+            }
+
+            Spacer()
+
+            // Hardware info badge
+            Text(HardwareAdaptor.description)
+                .font(.caption2)
+                .foregroundColor(.secondary)
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 8)
+        .background(Color(NSColor.controlBackgroundColor).opacity(0.5))
+    }
+
+    // MARK: - Folder Picker
+
+    func pickFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories    = true
+        panel.canChooseFiles          = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories    = false
+        panel.message                 = "Select a folder containing photos to scan"
+        panel.prompt                  = "Select Folder"
+
+        if panel.runModal() == .OK, let url = panel.url {
+            vm.selectedFolderURL = url
+            vm.scanFileSystem    = true
+        }
+    }
+
     // MARK: - Idle View
 
     var idleView: some View {
@@ -141,11 +237,11 @@ struct ContentView: View {
             Image(systemName: "photo.on.rectangle.angled")
                 .font(.system(size: 56))
                 .foregroundColor(.secondary)
-            Text("Find screenshots, memes, duplicates, and other\nnon-photo items in your Photos library.")
+            Text("Find screenshots, memes, duplicates, and other\nnon-photo items in your Photos library and folders.")
                 .font(.subheadline)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
-            Text("Click Start Scan to begin.")
+            Text("Select your sources above, then click Start Scan.")
                 .font(.caption)
                 .foregroundColor(.secondary)
             Spacer()
@@ -220,9 +316,9 @@ struct ContentView: View {
             VStack(spacing: 16) {
                 GroupBox {
                     VStack(alignment: .leading, spacing: 8) {
-                        Label(vm.statusMessage, systemImage: "checkmark.circle.fill")
+                        Label(vm.statusMessage, systemImage: vm.scanPhase == .cancelled ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
                             .font(.subheadline)
-                            .foregroundColor(.green)
+                            .foregroundColor(vm.scanPhase == .cancelled ? .orange : .green)
 
                         HStack(spacing: 24) {
                             statBadge(label: "Total Photos", value: vm.allItems.count, color: .blue)
@@ -231,6 +327,16 @@ struct ContentView: View {
                             statBadge(label: "Web Images",
                                       value: vm.allItems.filter { $0.sourceClassification == .webSavedImage }.count,
                                       color: .purple)
+                        }
+
+                        // v3: source breakdown
+                        let photoKitCount = vm.allItems.filter { $0.photoSource == .photoKit }.count
+                        let folderCount   = vm.allItems.filter { $0.photoSource == .fileSystem }.count
+                        if photoKitCount > 0 && folderCount > 0 {
+                            HStack(spacing: 24) {
+                                statBadge(label: "Photos Library", value: photoKitCount, color: .cyan)
+                                statBadge(label: "Folder", value: folderCount, color: .teal)
+                            }
                         }
                     }
                     .padding(.vertical, 4)
@@ -371,6 +477,16 @@ struct ContentView: View {
                                         Text(item.filename)
                                             .font(.caption)
                                             .lineLimit(1)
+                                        // v3: source badge
+                                        if item.photoSource == .fileSystem {
+                                            Text("Folder")
+                                                .font(.caption2)
+                                                .padding(.horizontal, 5)
+                                                .padding(.vertical, 1)
+                                                .background(Color.teal.opacity(0.15))
+                                                .foregroundColor(.teal)
+                                                .clipShape(Capsule())
+                                        }
                                         Spacer()
                                         Text("\(item.width)x\(item.height)")
                                             .font(.caption)
@@ -532,7 +648,7 @@ struct ContentView: View {
 
     var scanLabel: String {
         if vm.isScanning { return "Scanning…" }
-        if vm.scanComplete { return "Scan Again" }
+        if vm.scanComplete || vm.scanPhase == .cancelled { return "Scan Again" }
         return "Start Scan"
     }
 

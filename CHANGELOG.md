@@ -7,6 +7,186 @@ Developed by **Claude Opus 4.6** and **Richard Henderson**.
 
 ---
 
+## [3.0.0] — 2026-03-07
+
+### Summary
+
+A major feature release that adds filesystem/network folder scanning alongside the existing
+Apple Photos library scan. PhotosCleaner can now scan photos stored on network drives, external
+disks, or any local folder — comparing them side by side with your Photos library to find
+duplicates across both sources. This release also introduces adaptive hardware-based performance
+tuning, an in-memory thumbnail cache for fast review of network photos, and a six-phase scan
+pipeline that supports dual-source scanning.
+
+### Added — Filesystem / Network Folder Scanning
+
+- **New file: `FileSystemScanner.swift`** — recursively enumerates image files in any folder
+  using `FileManager.enumerator`. Supports JPEG, PNG, HEIC, HEIF, TIFF, GIF, BMP, WebP, RAW,
+  CR2, NEF, ARW, and DNG file types. Skips hidden files and package descendants.
+- `loadImageMetadata(from:)` reads pixel dimensions via `CGImageSource` without decoding the
+  full image (fast, metadata-only), and falls back to file modification/creation date.
+- `classifyFileSystemImage(filename:width:height:)` detects screenshots via filename patterns
+  (including international patterns: Chinese "截屏", German "Bildschirmfoto"), small images,
+  and unusual aspect ratios.
+
+### Added — Thumbnail Cache for Network Photos
+
+- **New file: `ThumbnailCache.swift`** — singleton `NSCache`-based in-memory thumbnail cache
+  with a 200 MB cost limit and 500-item count limit.
+- Uses `CGImageSourceCreateThumbnailAtIndex` for efficient thumbnail generation with automatic
+  EXIF orientation correction — no full pixel decode needed.
+- Estimated memory cost tracking per cached thumbnail (width × height × 4 bytes per pixel).
+- Automatic eviction under memory pressure via `NSCache` system integration.
+- Cache is cleared at the start of each new scan.
+- Critical for network drives — avoids re-reading the same file during review/comparison.
+
+### Added — Adaptive Hardware Performance Tuning
+
+- **New file: `HardwareAdaptor.swift`** — detects CPU core count and physical RAM at runtime
+  using `ProcessInfo.processInfo` and adapts concurrency levels accordingly.
+- EXIF extraction concurrency: `max(2, cores / 2)` — M1 Max (10 cores) → 5, M2 Air → 4.
+- Fingerprint generation concurrency: `max(2, cores / 3)` — M1 Max → 3, M2 Air → 2.
+- Replaces previous hardcoded semaphore values of 6 (EXIF) and 4 (fingerprints).
+- Hardware description badge displayed in the source selection bar (e.g., "10 CPU cores, 64 GB RAM").
+
+### Added — Dual-Source Data Model
+
+- **`PhotoSource` enum** (`.photoKit`, `.fileSystem`) added to `PhotoItem.swift`.
+- New fields on `PhotoItem`: `photoSource` (defaults to `.photoKit` for backward compatibility)
+  and `fileURL` (optional, used for filesystem photos).
+- CSV export now includes a "PhotoSource" column.
+
+### Added — Filesystem EXIF and Fingerprinting
+
+- `EXIFExtractor.extractFromFile(at:completion:)` — wraps the existing `parseEXIF(from:)`
+  method (now made `static` instead of `private static`) for use with filesystem file URLs.
+- `EXIFExtractor.classifySourceFromFile(filename:exif:)` — classifies filesystem photos using
+  filename heuristics (screenshot and panorama patterns) plus EXIF Make/Model presence, since
+  `PHAsset.mediaSubtypes` is not available for non-PhotoKit items.
+- `DuplicateDetector.generateFingerprintFromFile(at:completion:)` — loads images from file
+  URLs using `CGImageSourceCreateThumbnailAtIndex` for efficient 512×512 thumbnail generation,
+  then runs the same `VNGenerateImageFeaturePrintRequest` used for PhotoKit photos.
+
+### Changed — Six-Phase Scan Pipeline
+
+- Scan pipeline expanded from 5 phases to 6 with a new Phase 0:
+  - **Phase 0/6: Scanning Folder** — recursive enumeration of the selected folder using
+    `FileSystemScanner.enumerateImages`. Skipped if no folder is selected.
+  - **Phase 1/6: Basic Classification** — now processes both PhotoKit assets and filesystem
+    URLs, creating `PhotoItem` instances with the appropriate `photoSource` value.
+  - **Phase 2/6: Reading EXIF Metadata** — branches on `photoSource`: PhotoKit items use the
+    existing `PHContentEditingInput` path, filesystem items use `extractFromFile(at:)`.
+  - **Phase 3/6: Classifying Sources** — branches on `photoSource`: PhotoKit uses
+    `classifySource(asset:exif:)`, filesystem uses `classifySourceFromFile(filename:exif:)`.
+  - **Phase 4/6: Generating Fingerprints** — branches on `photoSource`: PhotoKit uses
+    `PHImageManager`, filesystem uses `CGImageSource` direct loading.
+  - **Phases 5/6 and Final** — unchanged, already source-agnostic.
+- All semaphore values now use `HardwareAdaptor` computed properties.
+- Scan completion status message includes source breakdown (e.g., "4,200 from Photos, 1,800
+  from folder").
+
+### Changed — Source Selection UI
+
+- New **Source Selection Bar** in `ContentView` below the scan control bar with:
+  - "Photos Library" checkbox (default: on) — enables/disables PhotoKit scanning.
+  - "Folder" checkbox (default: off) — enables/disables filesystem scanning.
+  - Browse button that opens an `NSOpenPanel` for directory selection.
+  - Selected folder name display with a clear (×) button.
+  - Hardware info badge showing detected CPU cores and RAM.
+- Idle view updated to say "Select your sources above, then click Start Scan."
+- Overview tab shows separate "Photos Library" and "Folder" stat badges when both sources
+  were scanned.
+- Duplicate groups in the Duplicates tab now show a "Folder" badge on filesystem items.
+
+### Changed — Dual Image Loading in Review Views
+
+- `ReviewView.loadImage()` now branches on `photoSource`: filesystem items load via
+  `ThumbnailCache.shared.thumbnail(for:targetSize:completion:)`, PhotoKit items use the
+  existing `PHImageManager` path.
+- `DuplicateReviewView.loadImagesForCurrentGroup()` uses the same branching pattern.
+
+### Changed — Batch Deletion for Dual Sources
+
+- `processPendingDeletions` splits pending items by source:
+  - PhotoKit items → `PHPhotoLibrary.shared().performChanges` with `PHAssetChangeRequest.deleteAssets`
+  - Filesystem items → `NSWorkspace.shared.recycle` (moves to Trash)
+- `keepItem` and `moveItem` gracefully skip album operations for filesystem items (no Photos
+  album equivalent).
+- `createAlbum` filters to PhotoKit items only.
+
+### Changed — Project Configuration
+
+- Added `FileSystemScanner.swift`, `ThumbnailCache.swift`, and `HardwareAdaptor.swift` to
+  the Xcode project (PBXBuildFile, PBXFileReference, PBXSourcesBuildPhase, PBXGroup).
+- `MARKETING_VERSION` bumped from `2.0.1` to `3.0`.
+- `CURRENT_PROJECT_VERSION` bumped from `3` to `4`.
+- Version display in header bar updated to "v3.0".
+
+---
+
+## [2.0.1] — 2026-03-07
+
+### Summary
+
+A quality-of-life patch that adds the ability to stop a scan in progress. During deep scans
+(particularly Phase 4: Fingerprint Generation, which can take 15–30 minutes on large
+libraries), users can now click a "Stop Scan" button to cancel the operation immediately.
+Partial results from completed phases are preserved and displayed in the results dashboard.
+
+### Added — Stop Scan Feature
+
+- **New `stopScan()` method on `ScanViewModel`** — sets a thread-safe cancellation flag
+  (`isCancelled`) that is checked at multiple points throughout the scan pipeline.
+- **Thread-safe cancellation flag** — implemented with `NSLock`-protected getter/setter to
+  ensure safe reads from background threads and writes from the main thread simultaneously.
+- **New `ScanPhase.cancelled` case** — the scan phase enum now includes a `.cancelled` state
+  that is distinct from both `.idle` and `.complete`, allowing the UI to differentiate between
+  a scan that was never started, one that finished normally, and one that was stopped early.
+- **"Stop Scan" button in `ContentView`** — a red-tinted button with a stop icon that appears
+  in the scan control bar only while a scan is actively running. The button disappears once
+  the scan stops or completes.
+- **Partial results preservation** — when a scan is stopped, all data gathered up to that
+  point is kept. For example, if the user stops during Phase 4 (fingerprinting), they still
+  get the full Phase 1–3 results: basic classification, EXIF metadata, and source
+  classification. The results dashboard displays with an orange warning icon and a message
+  indicating which phase was interrupted.
+- **Cancellation check points** — the flag is checked in six locations across the pipeline:
+  - Inside the Phase 1 `enumerateObjects` loop (uses the `stop` pointer to halt enumeration)
+  - Between Phase 1 and Phase 2
+  - Inside the Phase 2 EXIF extraction loop (breaks the `for` loop before new semaphore waits)
+  - Between Phase 2 and Phase 3
+  - Inside the Phase 3 source classification loop
+  - Between Phase 3 and Phase 4
+  - Inside the Phase 4 fingerprint generation loop
+  - Between Phase 4 and Phase 5
+- **`handleCancellation(partialItems:partialTallies:)` helper** — centralizes the transition
+  to cancelled state, ensuring partial items and tallies are published to the UI and the
+  status message reports which phase was interrupted and how many photos were processed.
+
+### Changed — UI Updates
+
+- The scan control bar now conditionally renders the Stop Scan button alongside the existing
+  Start Scan button and Quick Scan toggle.
+- The `scanLabel` computed property now returns "Scan Again" for both `.complete` and
+  `.cancelled` states, so the user can easily restart after stopping.
+- The Overview tab's status banner uses an orange warning triangle icon (`exclamationmark.triangle.fill`)
+  for cancelled scans instead of the green checkmark used for completed scans.
+- Version display updated to "v2.0.1" in the header bar.
+
+### Changed — Project Configuration
+
+- `MARKETING_VERSION` bumped from `2.0` to `2.0.1`.
+- `CURRENT_PROJECT_VERSION` bumped from `2` to `3`.
+
+### Fixed — Entitlements Build Error
+
+- Removed XML comments from `PhotosCleaner.entitlements` that caused Xcode's code signing
+  step to report "Entitlements file was modified during the build." Xcode re-serializes the
+  entitlements plist during signing, which strips comments — triggering the modification
+  detection. The entitlements file now contains only the bare plist with no comments.
+
+---
+
 ## [2.0.0] — 2026-03-07
 
 ### Summary

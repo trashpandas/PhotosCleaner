@@ -280,27 +280,38 @@ struct DuplicateReviewView: View {
         guard let group = currentGroup else { return }
         for item in group.items {
             guard loadedImages[item.id] == nil else { continue }
-            let results = PHAsset.fetchAssets(withLocalIdentifiers: [item.id], options: nil)
-            guard let asset = results.firstObject else { continue }
 
-            let opts = PHImageRequestOptions()
-            opts.deliveryMode          = .opportunistic
-            opts.isNetworkAccessAllowed = true
-            opts.isSynchronous          = false
-
-            PHImageManager.default().requestImage(
-                for: asset,
-                targetSize: CGSize(width: 560, height: 440),
-                contentMode: .aspectFit,
-                options: opts
-            ) { image, info in
-                let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
-                if let img = image {
-                    DispatchQueue.main.async {
+            if item.photoSource == .fileSystem, let url = item.fileURL {
+                // Filesystem path — use ThumbnailCache
+                ThumbnailCache.shared.thumbnail(for: url, targetSize: CGSize(width: 560, height: 440)) { image in
+                    if let img = image {
                         self.loadedImages[item.id] = img
                     }
                 }
-                _ = degraded  // suppress unused warning
+            } else {
+                // PhotoKit path
+                let results = PHAsset.fetchAssets(withLocalIdentifiers: [item.id], options: nil)
+                guard let asset = results.firstObject else { continue }
+
+                let opts = PHImageRequestOptions()
+                opts.deliveryMode          = .opportunistic
+                opts.isNetworkAccessAllowed = true
+                opts.isSynchronous          = false
+
+                PHImageManager.default().requestImage(
+                    for: asset,
+                    targetSize: CGSize(width: 560, height: 440),
+                    contentMode: .aspectFit,
+                    options: opts
+                ) { image, info in
+                    let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
+                    if let img = image {
+                        DispatchQueue.main.async {
+                            self.loadedImages[item.id] = img
+                        }
+                    }
+                    _ = degraded
+                }
             }
         }
     }

@@ -20,6 +20,7 @@ import Foundation
 import Photos
 import Vision
 import AppKit
+import ImageIO
 
 // MARK: - Duplicate Detector
 
@@ -75,6 +76,45 @@ enum DuplicateDetector {
                 } catch {
                     completion(nil)
                 }
+            }
+        }
+    }
+
+    // MARK: - Filesystem Fingerprint Generation
+
+    /// Generate a VNFeaturePrintObservation from a file URL on disk.
+    /// Loads the image, resizes to 512x512, then runs Vision.
+    static func generateFingerprintFromFile(
+        at url: URL,
+        completion: @escaping (VNFeaturePrintObservation?) -> Void
+    ) {
+        DispatchQueue.global(qos: .userInitiated).async {
+            guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else {
+                completion(nil)
+                return
+            }
+
+            // Use CGImageSource thumbnail generation for efficient 512x512 loading
+            let options: [CFString: Any] = [
+                kCGImageSourceCreateThumbnailFromImageAlways: true,
+                kCGImageSourceThumbnailMaxPixelSize: 512,
+                kCGImageSourceCreateThumbnailWithTransform: true
+            ]
+
+            guard let cgImage = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary) else {
+                completion(nil)
+                return
+            }
+
+            let request = VNGenerateImageFeaturePrintRequest()
+            let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+
+            do {
+                try handler.perform([request])
+                let result = request.results?.first as? VNFeaturePrintObservation
+                completion(result)
+            } catch {
+                completion(nil)
             }
         }
     }

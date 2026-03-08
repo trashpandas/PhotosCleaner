@@ -436,7 +436,7 @@ struct ReviewView: View {
     // MARK: - Image Loading
 
     func loadImage() {
-        // Cancel any in-flight request
+        // Cancel any in-flight PhotoKit request
         if requestID != PHInvalidImageRequestID {
             PHImageManager.default().cancelImageRequest(requestID)
             requestID = PHInvalidImageRequestID
@@ -447,27 +447,36 @@ struct ReviewView: View {
         loadedImage   = nil
         imageLoading  = true
 
-        let results = PHAsset.fetchAssets(withLocalIdentifiers: [item.id], options: nil)
-        guard let asset = results.firstObject else {
-            imageLoading = false
-            return
-        }
+        if item.photoSource == .fileSystem, let url = item.fileURL {
+            // Filesystem path — use ThumbnailCache
+            ThumbnailCache.shared.thumbnail(for: url, targetSize: CGSize(width: 700, height: 480)) { image in
+                self.loadedImage  = image
+                self.imageLoading = false
+            }
+        } else {
+            // PhotoKit path
+            let results = PHAsset.fetchAssets(withLocalIdentifiers: [item.id], options: nil)
+            guard let asset = results.firstObject else {
+                imageLoading = false
+                return
+            }
 
-        let opts = PHImageRequestOptions()
-        opts.deliveryMode          = .opportunistic   // low-res first, then full
-        opts.isNetworkAccessAllowed = true            // fetch from iCloud if needed
-        opts.isSynchronous          = false
+            let opts = PHImageRequestOptions()
+            opts.deliveryMode          = .opportunistic
+            opts.isNetworkAccessAllowed = true
+            opts.isSynchronous          = false
 
-        requestID = PHImageManager.default().requestImage(
-            for: asset,
-            targetSize: CGSize(width: 700, height: 480),
-            contentMode: .aspectFit,
-            options: opts
-        ) { image, info in
-            DispatchQueue.main.async {
-                if let img = image { self.loadedImage = img }
-                let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
-                if !degraded { self.imageLoading = false }
+            requestID = PHImageManager.default().requestImage(
+                for: asset,
+                targetSize: CGSize(width: 700, height: 480),
+                contentMode: .aspectFit,
+                options: opts
+            ) { image, info in
+                DispatchQueue.main.async {
+                    if let img = image { self.loadedImage = img }
+                    let degraded = (info?[PHImageResultIsDegradedKey] as? Bool) ?? false
+                    if !degraded { self.imageLoading = false }
+                }
             }
         }
     }

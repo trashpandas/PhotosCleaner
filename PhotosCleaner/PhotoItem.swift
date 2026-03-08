@@ -18,6 +18,14 @@
 
 import Foundation
 
+// MARK: - Photo Source
+
+/// Whether the photo came from the Apple Photos library or the filesystem.
+enum PhotoSource: String {
+    case photoKit   = "Photos Library"
+    case fileSystem = "Folder"
+}
+
 // MARK: - Source Classification
 
 /// How the photo was captured / where it came from.
@@ -95,6 +103,10 @@ struct PhotoItem: Identifiable {
     // v2: Duplicate detection
     var duplicateGroupID: UUID? = nil
     var isDuplicate: Bool = false
+
+    // v3: Source tracking
+    var photoSource: PhotoSource = .photoKit
+    var fileURL: URL? = nil
 
     // MARK: Computed
 
