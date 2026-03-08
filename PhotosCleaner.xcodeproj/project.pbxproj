@@ -23,6 +23,7 @@
 		A1B2C3D40000002D /* FileSystemScanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D40000001E /* FileSystemScanner.swift */; };
 		A1B2C3D40000002E /* ThumbnailCache.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D40000001F /* ThumbnailCache.swift */; };
 		A1B2C3D400000033 /* HardwareAdaptor.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D400000034 /* HardwareAdaptor.swift */; };
+		A1B2C3D400000035 /* MenuBarManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1B2C3D400000036 /* MenuBarManager.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -44,6 +45,7 @@
 		A1B2C3D40000001E /* FileSystemScanner.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FileSystemScanner.swift; sourceTree = "<group>"; };
 		A1B2C3D40000001F /* ThumbnailCache.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ThumbnailCache.swift; sourceTree = "<group>"; };
 		A1B2C3D400000034 /* HardwareAdaptor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HardwareAdaptor.swift; sourceTree = "<group>"; };
+		A1B2C3D400000036 /* MenuBarManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MenuBarManager.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -83,6 +85,7 @@
 				A1B2C3D40000001E /* FileSystemScanner.swift */,
 				A1B2C3D40000001F /* ThumbnailCache.swift */,
 				A1B2C3D400000034 /* HardwareAdaptor.swift */,
+				A1B2C3D400000036 /* MenuBarManager.swift */,
 				A1B2C3D400000014 /* Assets.xcassets */,
 				A1B2C3D400000015 /* PhotosCleaner.entitlements */,
 			A1B2C3D400000018 /* Credits.rtf */,
@@ -189,6 +192,7 @@
 				A1B2C3D40000002D /* FileSystemScanner.swift in Sources */,
 				A1B2C3D40000002E /* ThumbnailCache.swift in Sources */,
 				A1B2C3D400000033 /* HardwareAdaptor.swift in Sources */,
+				A1B2C3D400000035 /* MenuBarManager.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -312,7 +316,7 @@
 				CODE_SIGN_ENTITLEMENTS = PhotosCleaner/PhotosCleaner.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 4;
+				CURRENT_PROJECT_VERSION = 5;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.photography";
@@ -323,7 +327,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 3.0;
+				MARKETING_VERSION = 3.1;
 				PRODUCT_BUNDLE_IDENTIFIER = "ca.gov.ab.richardhenderson.photoscleaner";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
@@ -340,7 +344,7 @@
 				CODE_SIGN_ENTITLEMENTS = PhotosCleaner/PhotosCleaner.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 4;
+				CURRENT_PROJECT_VERSION = 5;
 				ENABLE_HARDENED_RUNTIME = YES;
 				GENERATE_INFOPLIST_FILE = YES;
 				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.photography";
@@ -351,7 +355,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 3.0;
+				MARKETING_VERSION = 3.1;
 				PRODUCT_BUNDLE_IDENTIFIER = "ca.gov.ab.richardhenderson.photoscleaner";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;

@@ -42,6 +42,8 @@ Results are presented in a tabbed dashboard with four views:
 - **CSV export** of the full library analysis with all metadata columns including photo source
 - **Review album creation** in Photos for flagged items
 - **Speed Mode** for rapid triage of large libraries
+- **Menu bar status item** — a line art broom icon in the macOS menu bar with a mini-menu showing scan status, progress bar, and start/stop controls
+- **Real-time scan log** — a CLI-like console view in the main window during scanning that shows exactly what the app is doing with timestamped, color-coded entries
 
 ## Requirements
 
@@ -73,6 +75,7 @@ PhotosCleaner/
 ├── FileSystemScanner.swift     # Recursive folder image enumeration and basic classification
 ├── ThumbnailCache.swift        # NSCache-based in-memory thumbnail cache for folder photos
 ├── HardwareAdaptor.swift       # Adaptive concurrency based on CPU cores and RAM
+├── MenuBarManager.swift        # macOS menu bar status item with broom icon and mini-menu
 ├── ReviewView.swift            # Item-by-item review interface (dual image loading)
 ├── DuplicateReviewView.swift   # Side-by-side duplicate review interface (dual image loading)
 ├── PhotosCleaner.entitlements  # Hardened Runtime entitlements for Photos access

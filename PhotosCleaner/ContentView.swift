@@ -22,7 +22,7 @@ import UniformTypeIdentifiers
 
 struct ContentView: View {
 
-    @StateObject private var vm = ScanViewModel()
+    @ObservedObject var vm: ScanViewModel
 
     // Alert state
     @State private var alertTitle   = ""
@@ -86,7 +86,7 @@ struct ContentView: View {
                 .font(.title3.bold())
                 .foregroundColor(.white)
             Spacer()
-            Text("v3.0")
+            Text("v3.1")
                 .font(.caption)
                 .foregroundColor(Color.white.opacity(0.5))
         }
@@ -252,35 +252,99 @@ struct ContentView: View {
     // MARK: - Scanning View
 
     var scanningView: some View {
-        VStack(spacing: 16) {
-            Spacer()
-
-            ProgressView()
-                .scaleEffect(1.5)
-
-            Text(vm.scanPhase.rawValue)
-                .font(.headline)
-
-            Text(vm.statusMessage)
-                .font(.subheadline)
-                .foregroundColor(.secondary)
-                .multilineTextAlignment(.center)
+        VStack(spacing: 12) {
+            // Top status area
+            HStack(spacing: 12) {
+                ProgressView()
+                    .scaleEffect(0.8)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(vm.scanPhase.rawValue)
+                        .font(.headline)
+                    Text(vm.statusMessage)
+                        .font(.caption)
+                        .foregroundColor(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer()
+                if vm.totalCount > 0 {
+                    Text("\(vm.scannedCount.formatted()) / \(vm.totalCount.formatted())")
+                        .font(.caption.monospacedDigit())
+                        .foregroundColor(.secondary)
+                }
+            }
+            .padding(.horizontal, 20)
+            .padding(.top, 12)
 
             ProgressView(value: vm.progress)
                 .progressViewStyle(.linear)
-                .frame(maxWidth: 400)
+                .padding(.horizontal, 20)
 
-            if vm.totalCount > 0 {
-                Text("\(vm.scannedCount.formatted()) / \(vm.totalCount.formatted())")
-                    .font(.caption)
-                    .foregroundColor(.secondary)
-                    .monospacedDigit()
-            }
-
-            Spacer()
+            // CLI-like scan log
+            scanLogView
         }
         .frame(maxWidth: .infinity)
-        .padding(20)
+    }
+
+    // MARK: - Scan Log View (CLI-like)
+
+    var scanLogView: some View {
+        GroupBox {
+            ScrollViewReader { proxy in
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 1) {
+                        ForEach(vm.scanLog) { entry in
+                            HStack(alignment: .top, spacing: 8) {
+                                Text(entry.timeString)
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundColor(.secondary)
+                                    .frame(width: 85, alignment: .leading)
+                                Text(entry.message)
+                                    .font(.system(size: 11, design: .monospaced))
+                                    .foregroundColor(logColor(for: entry.message))
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                            .padding(.vertical, 1)
+                            .id(entry.id)
+                        }
+                    }
+                    .padding(8)
+                }
+                .onChange(of: vm.scanLog.count) { _ in
+                    if let last = vm.scanLog.last {
+                        withAnimation(.easeOut(duration: 0.1)) {
+                            proxy.scrollTo(last.id, anchor: .bottom)
+                        }
+                    }
+                }
+            }
+            .frame(maxHeight: .infinity)
+            .background(Color(NSColor.textBackgroundColor))
+        } label: {
+            HStack {
+                Label("Scan Log", systemImage: "terminal")
+                    .font(.caption.weight(.semibold))
+                Spacer()
+                Text("\(vm.scanLog.count) entries")
+                    .font(.caption2)
+                    .foregroundColor(.secondary)
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.bottom, 12)
+    }
+
+    func logColor(for message: String) -> Color {
+        if message.contains("Complete") || message.contains("complete") {
+            return .green
+        } else if message.contains("cancelled") || message.contains("Stopped") || message.contains("Error") {
+            return .orange
+        } else if message.contains("Skipped") {
+            return .yellow
+        } else if message.hasPrefix("[Phase") || message.hasPrefix("[Final") {
+            return .cyan
+        } else {
+            return .primary
+        }
     }
 
     // MARK: - Results View (tabs)
@@ -767,5 +831,5 @@ private struct ExportHelper: NSViewRepresentable {
 }
 
 #Preview {
-    ContentView()
+    ContentView(vm: ScanViewModel())
 }

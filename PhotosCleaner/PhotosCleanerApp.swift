@@ -20,9 +20,19 @@ import SwiftUI
 
 @main
 struct PhotosCleanerApp: App {
+
+    /// Shared view model — passed to both the main window and the menu bar manager.
+    @StateObject private var vm = ScanViewModel()
+
+    /// Menu bar status item manager — lives for the app's lifetime.
+    @StateObject private var menuBar = MenuBarManager()
+
     var body: some Scene {
         WindowGroup {
-            ContentView()
+            ContentView(vm: vm)
+                .onAppear {
+                    menuBar.setUp(with: vm)
+                }
         }
         .windowStyle(.titleBar)
         .windowToolbarStyle(.unified)

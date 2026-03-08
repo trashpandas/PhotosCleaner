@@ -37,6 +37,20 @@ enum AppError: LocalizedError {
     }
 }
 
+// MARK: - Scan Log Entry
+
+struct ScanLogEntry: Identifiable {
+    let id = UUID()
+    let timestamp: Date
+    let message: String
+
+    var timeString: String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss.SSS"
+        return formatter.string(from: timestamp)
+    }
+}
+
 // MARK: - Scan Phase
 
 enum ScanPhase: String {
@@ -68,6 +82,23 @@ class ScanViewModel: ObservableObject {
 
     /// Skip fingerprinting & duplicate detection for a faster scan.
     @Published var skipFingerprinting: Bool = false
+
+    // ── Scan Log (v3.1) ─────────────────────────────────────────────────
+    @Published var scanLog = [ScanLogEntry]()
+    private let logLock = NSLock()
+    private static let maxLogEntries = 500
+
+    /// Thread-safe: appends a log entry and publishes on main queue.
+    func appendLog(_ message: String) {
+        let entry = ScanLogEntry(timestamp: Date(), message: message)
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.scanLog.append(entry)
+            if self.scanLog.count > Self.maxLogEntries {
+                self.scanLog.removeFirst(self.scanLog.count - Self.maxLogEntries)
+            }
+        }
+    }
 
     // ── Source selection (v3) ─────────────────────────────────────────────
     @Published var scanPhotoKit: Bool = true
@@ -195,6 +226,14 @@ class ScanViewModel: ObservableObject {
         scannedCount       = 0
         totalCount         = 0
         errorMessage       = nil
+        scanLog            = []
+
+        appendLog("Starting scan…")
+        if scanPhotoKit { appendLog("Source: Photos Library enabled") }
+        if scanFileSystem, let url = selectedFolderURL {
+            appendLog("Source: Folder enabled — \(url.path)")
+        }
+        appendLog("Hardware: \(HardwareAdaptor.description)")
 
         // Clear thumbnail cache for fresh scan
         ThumbnailCache.shared.clear()
@@ -219,14 +258,17 @@ class ScanViewModel: ObservableObject {
     // ── Phase 0: Folder Enumeration (v3) ─────────────────────────────────
 
     private func phase0EnumerateFolder(folderURL: URL) {
+        appendLog("[Phase 0] Enumerating folder: \(folderURL.lastPathComponent)")
         let urls = FileSystemScanner.enumerateImages(in: folderURL)
 
         if isCancelled {
+            appendLog("Scan cancelled during folder enumeration.")
             handleCancellation()
             return
         }
 
         folderImageURLs = urls
+        appendLog("[Phase 0] Found \(urls.count) images in folder")
 
         DispatchQueue.main.async { [weak self] in
             self?.folderPhotoCount = urls.count
@@ -245,11 +287,13 @@ class ScanViewModel: ObservableObject {
     // ── Phase 1: Basic Classification ───────────────────────────────────────
 
     private func phase1Classify() {
+        appendLog("[Phase 1] Basic classification starting…")
         var items = [PhotoItem]()
         var tally = [String: Int]()
 
         // 1a. PhotoKit photos
         if scanPhotoKit {
+            appendLog("[Phase 1] Fetching Photos Library assets…")
             let fetchOptions = PHFetchOptions()
             fetchOptions.includeHiddenAssets   = false
             fetchOptions.includeAllBurstAssets = false
@@ -285,12 +329,21 @@ class ScanViewModel: ObservableObject {
         }
 
         if isCancelled {
+            appendLog("Scan cancelled during PhotoKit classification.")
             let sortedTally = tally.sorted { $0.value > $1.value }.map { TallyRow(reason: $0.key, count: $0.value) }
             handleCancellation(partialItems: items, partialTallies: sortedTally)
             return
         }
 
+        if scanPhotoKit {
+            let pkCount = items.count
+            appendLog("[Phase 1] PhotoKit: classified \(pkCount) assets")
+        }
+
         // 1b. Filesystem photos
+        if !folderImageURLs.isEmpty {
+            appendLog("[Phase 1] Classifying \(folderImageURLs.count) folder images…")
+        }
         for (index, url) in folderImageURLs.enumerated() {
             if isCancelled { break }
 
@@ -335,6 +388,9 @@ class ScanViewModel: ObservableObject {
             return
         }
 
+        let flagCount = items.filter { !$0.reasons.isEmpty }.count
+        appendLog("[Phase 1] Complete: \(total) photos classified, \(flagCount) flagged")
+
         DispatchQueue.main.async { [weak self] in
             self?.totalCount   = total
             self?.allItems     = items
@@ -351,6 +407,7 @@ class ScanViewModel: ObservableObject {
     // ── Phase 2: EXIF Metadata Extraction ───────────────────────────────────
 
     private func phase2ExtractEXIF(items: [PhotoItem], total: Int) {
+        appendLog("[Phase 2] EXIF extraction starting for \(total) photos (concurrency: \(HardwareAdaptor.exifConcurrency))…")
         DispatchQueue.main.async { [weak self] in
             self?.scanPhase     = .extractingEXIF
             self?.statusMessage = "Phase 2/6 — Reading EXIF metadata…"
@@ -374,7 +431,7 @@ class ScanViewModel: ObservableObject {
 
             if item.photoSource == .photoKit, let asset = assetMap[item.id] {
                 // PhotoKit path
-                EXIFExtractor.extract(from: asset) { exif in
+                EXIFExtractor.extract(from: asset) { [weak self] exif in
                     lock.lock()
                     updated[i].exif = exif
                     completed += 1
@@ -385,8 +442,9 @@ class ScanViewModel: ObservableObject {
                     group.leave()
 
                     if c % 50 == 0 || c == total {
+                        self?.appendLog("[Phase 2] EXIF: \(c)/\(total) — \(item.filename)")
                         let p = Double(c) / Double(max(total, 1))
-                        DispatchQueue.main.async { [weak self] in
+                        DispatchQueue.main.async {
                             self?.progress     = p
                             self?.scannedCount = c
                         }
@@ -394,7 +452,7 @@ class ScanViewModel: ObservableObject {
                 }
             } else if item.photoSource == .fileSystem, let url = item.fileURL {
                 // Filesystem path
-                EXIFExtractor.extractFromFile(at: url) { exif in
+                EXIFExtractor.extractFromFile(at: url) { [weak self] exif in
                     lock.lock()
                     updated[i].exif = exif
                     completed += 1
@@ -405,8 +463,9 @@ class ScanViewModel: ObservableObject {
                     group.leave()
 
                     if c % 50 == 0 || c == total {
+                        self?.appendLog("[Phase 2] EXIF: \(c)/\(total) — \(item.filename)")
                         let p = Double(c) / Double(max(total, 1))
-                        DispatchQueue.main.async { [weak self] in
+                        DispatchQueue.main.async {
                             self?.progress     = p
                             self?.scannedCount = c
                         }
@@ -424,16 +483,19 @@ class ScanViewModel: ObservableObject {
         group.wait()
 
         if isCancelled {
+            appendLog("Scan cancelled during EXIF extraction.")
             handleCancellation(partialItems: updated)
             return
         }
 
+        appendLog("[Phase 2] Complete: EXIF extracted for \(total) photos")
         phase3ClassifySources(items: updated, total: total)
     }
 
     // ── Phase 3: Source Classification ───────────────────────────────────────
 
     private func phase3ClassifySources(items: [PhotoItem], total: Int) {
+        appendLog("[Phase 3] Source classification starting…")
         DispatchQueue.main.async { [weak self] in
             self?.scanPhase     = .classifyingSources
             self?.statusMessage = "Phase 3/6 — Classifying photo sources…"
@@ -465,9 +527,12 @@ class ScanViewModel: ObservableObject {
         }
 
         if isCancelled {
+            appendLog("Scan cancelled during source classification.")
             handleCancellation(partialItems: updated)
             return
         }
+
+        appendLog("[Phase 3] Complete: sources classified for \(total) photos")
 
         let sTallies = CategoryAnalyzer.sourceBreakdown(updated)
         let camBreak = CategoryAnalyzer.cameraBreakdown(updated)
@@ -487,6 +552,8 @@ class ScanViewModel: ObservableObject {
         }()
 
         if skip {
+            appendLog("[Phase 4] Skipped — Quick Scan mode")
+            appendLog("[Phase 5] Skipped — Quick Scan mode")
             phaseFinalCategorize(items: updated)
         } else {
             phase4GenerateFingerprints(items: updated, total: total)
@@ -496,6 +563,7 @@ class ScanViewModel: ObservableObject {
     // ── Phase 4: Fingerprint Generation ─────────────────────────────────────
 
     private func phase4GenerateFingerprints(items: [PhotoItem], total: Int) {
+        appendLog("[Phase 4] Fingerprint generation starting for \(total) photos (concurrency: \(HardwareAdaptor.fingerprintConcurrency))…")
         DispatchQueue.main.async { [weak self] in
             self?.scanPhase     = .generatingFingerprints
             self?.statusMessage = "Phase 4/6 — Generating perceptual fingerprints (this may take a while)…"
@@ -533,6 +601,7 @@ class ScanViewModel: ObservableObject {
                     group.leave()
 
                     if c % 20 == 0 || c == total {
+                        self?.appendLog("[Phase 4] Fingerprint: \(c)/\(total) — \(item.filename)")
                         let p = Double(c) / Double(max(total, 1))
                         DispatchQueue.main.async {
                             self?.progress     = p
@@ -558,6 +627,7 @@ class ScanViewModel: ObservableObject {
                     group.leave()
 
                     if c % 20 == 0 || c == total {
+                        self?.appendLog("[Phase 4] Fingerprint: \(c)/\(total) — \(item.filename)")
                         let p = Double(c) / Double(max(total, 1))
                         DispatchQueue.main.async {
                             self?.progress     = p
@@ -577,9 +647,12 @@ class ScanViewModel: ObservableObject {
         group.wait()
 
         if isCancelled {
+            appendLog("Scan cancelled during fingerprint generation.")
             handleCancellation(partialItems: items)
             return
         }
+
+        appendLog("[Phase 4] Complete: generated \(fpMap.count) fingerprints")
 
         DispatchQueue.main.async { [weak self] in
             self?.fingerprints = fpMap
@@ -591,6 +664,7 @@ class ScanViewModel: ObservableObject {
     // ── Phase 5: Duplicate Detection ────────────────────────────────────────
 
     private func phase5DetectDuplicates(items: [PhotoItem], fingerprints fpMap: [String: VNFeaturePrintObservation]) {
+        appendLog("[Phase 5] Duplicate detection starting (\(fpMap.count) fingerprints to compare)…")
         DispatchQueue.main.async { [weak self] in
             self?.scanPhase     = .detectingDuplicates
             self?.statusMessage = "Phase 5/6 — Comparing fingerprints for duplicates…"
@@ -611,6 +685,8 @@ class ScanViewModel: ObservableObject {
             }
         }
 
+        appendLog("[Phase 5] Complete: found \(groups.count) duplicate groups")
+
         DispatchQueue.main.async { [weak self] in
             self?.allItems        = updated
             self?.flaggedItems    = updated.filter { !$0.reasons.isEmpty }
@@ -623,6 +699,7 @@ class ScanViewModel: ObservableObject {
     // ── Final: Content Categorization ───────────────────────────────────────
 
     private func phaseFinalCategorize(items: [PhotoItem]) {
+        appendLog("[Final] Content categorization and geocoding…")
         let (categorized, catTallies) = CategoryAnalyzer.categorizeAll(items)
 
         reverseGeocodeLocations(categorized) { [weak self] geoItems in
@@ -656,6 +733,7 @@ class ScanViewModel: ObservableObject {
                     if dupCount > 0   { parts.append("\(dupCount.formatted()) duplicate groups") }
                     self.statusMessage = "Scan complete. Found \(parts.joined(separator: " and ")) out of \(categorized.count.formatted()) photos (\(sourceParts.joined(separator: ", ")))."
                 }
+                self.appendLog("Scan complete! \(geoItems.count) photos analyzed.")
             }
         }
     }

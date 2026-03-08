@@ -7,6 +7,87 @@ Developed by **Claude Opus 4.6** and **Richard Henderson**.
 
 ---
 
+## [3.1.0] — 2026-03-07
+
+### Summary
+
+A feature release that adds two new quality-of-life features: a macOS menu bar status item
+with a line art broom icon and mini-menu, and a real-time CLI-like scan log in the main
+window that shows exactly what the app is doing during scanning.
+
+### Added — Menu Bar Status Item (`MenuBarManager.swift`)
+
+- **New file: `MenuBarManager.swift`** — manages an `NSStatusItem` in the macOS menu bar
+  that persists while PhotosCleaner is running.
+- **Line art broom icon** drawn programmatically with `NSBezierPath` — a diagonal broom
+  handle with fanned bristles and motion sweep marks. Set as `.isTemplate = true` to
+  automatically adapt to light/dark menu bar appearances.
+- **Scanning indicator** — when a scan is in progress, a small green dot appears on the
+  broom icon and the icon switches to non-template mode to show the colored dot.
+- **Mini-menu** with the following items:
+  - App title ("PhotosCleaner") in bold.
+  - Dynamic status line showing the current scan phase or "Ready to scan" / "Scan complete".
+  - ASCII progress bar with percentage (e.g., `[======    ]  60%`) — hidden when idle.
+  - Action button that toggles between "Start Scan" and "Stop Scan" based on scan state.
+  - "Show Window" — activates the app and brings the main window to front.
+  - "Quit PhotosCleaner" — standard quit item.
+- Uses **Combine** to observe `ScanViewModel` published properties (`scanPhase`,
+  `statusMessage`, `progress`) and update menu items in real time.
+
+### Added — Real-Time Scan Log
+
+- **`ScanLogEntry` struct** — timestamp + message, with a formatted time string
+  (`HH:mm:ss.SSS`).
+- **`@Published var scanLog`** on `ScanViewModel` — an array of `ScanLogEntry` items that
+  grows during the scan, capped at 500 entries with automatic trimming.
+- **`appendLog(_:)` method** — thread-safe log appender that can be called from any thread
+  and publishes to the main queue.
+- **Log calls throughout the scan pipeline:**
+  - Scan start: sources selected, hardware description.
+  - Phase 0: folder enumeration start/result.
+  - Phase 1: classification start, PhotoKit asset count, folder classification progress.
+  - Phase 2: EXIF extraction start (with concurrency level), periodic progress with filenames.
+  - Phase 3: source classification start/complete.
+  - Phase 4: fingerprint generation start (with concurrency level), periodic progress.
+  - Phase 5: duplicate detection start/complete with group count.
+  - Final: categorization and geocoding.
+  - Cancellation events logged at the phase where they occurred.
+
+### Added — Scan Log UI (`ContentView.swift`)
+
+- **Redesigned scanning view** — replaced the centered spinner/text layout with a compact
+  status bar at top (phase name, status message, progress counts) followed by a full-height
+  scan log panel.
+- **CLI-like log view** — a `GroupBox` labeled "Scan Log" containing a monospaced-font
+  `ScrollView` with `LazyVStack` of log entries. Each entry shows a timestamp (left column)
+  and message (right column).
+- **Auto-scroll** — the log automatically scrolls to the latest entry using `ScrollViewReader`.
+- **Color-coded messages:**
+  - Green: completion messages.
+  - Orange: cancellation/error messages.
+  - Yellow: skipped phases.
+  - Cyan: phase headers.
+  - Default: regular log entries.
+- **Entry count badge** in the group box label shows the running count of log entries.
+
+### Changed — App Architecture
+
+- `ScanViewModel` is now created as a `@StateObject` in `PhotosCleanerApp` and passed to
+  both `ContentView` and `MenuBarManager`, ensuring a single shared instance.
+- `ContentView` changed from `@StateObject private var vm` to `@ObservedObject var vm` to
+  accept the externally-owned view model.
+- `MenuBarManager` is initialized via `setUp(with:)` in `ContentView.onAppear`.
+
+### Changed — Project Configuration
+
+- Added `MenuBarManager.swift` to the Xcode project (PBXBuildFile, PBXFileReference,
+  PBXSourcesBuildPhase, PBXGroup).
+- `MARKETING_VERSION` bumped from `3.0` to `3.1`.
+- `CURRENT_PROJECT_VERSION` bumped from `4` to `5`.
+- Version display in header bar updated to "v3.1".
+
+---
+
 ## [3.0.0] — 2026-03-07
 
 ### Summary
