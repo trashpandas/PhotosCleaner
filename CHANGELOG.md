@@ -7,6 +7,59 @@ Developed by **Claude Opus 4.6** and **Richard Henderson**.
 
 ---
 
+## [3.1.1] — 2026-03-07
+
+### Summary
+
+An incremental update that adds a collapsible sidebar configuration panel, replacing the
+inline source selection bar and Quick Scan checkbox. Users can now toggle individual scan
+features on or off before starting a scan, with a live "Active Phases" indicator showing
+which pipeline stages will run.
+
+### Added — Collapsible Sidebar Config Panel
+
+- **Sidebar toggle button** in the header bar (sidebar.left icon) — collapses/expands the
+  config panel with a smooth animation. The main window width adjusts to accommodate.
+- **Scan Sources section** — Photos Library and Folder toggles with the folder browse/clear
+  UI, moved from the old source selection bar into the sidebar.
+- **Analysis Features section** — three independent toggles:
+  - **EXIF Metadata** (`enableEXIF`) — controls Phase 2 (EXIF extraction). When disabled,
+    Phases 2 and 3 are both skipped since source classification depends on EXIF data.
+  - **Source Classification** (`enableSourceClassification`) — controls Phase 3. Auto-disables
+    when EXIF is turned off, and greys out to indicate the dependency.
+  - **Duplicate Detection** — controls Phases 4 and 5 (replaces the old Quick Scan checkbox).
+- **Active Phases indicator** — a live checklist of all six pipeline phases with green
+  checkmarks for enabled phases and greyed-out strikethrough text for disabled phases.
+  Updates instantly as toggles change.
+
+### Added — Feature Toggle Properties on ScanViewModel
+
+- `@Published var enableEXIF: Bool = true` — gates Phase 2 (EXIF extraction) and cascades
+  to Phase 3 when disabled.
+- `@Published var enableSourceClassification: Bool = true` — gates Phase 3 (source
+  classification). Automatically set to false when EXIF is disabled.
+- Scan pipeline now reads these toggles (on the main thread) at each phase transition and
+  logs skip messages when phases are bypassed.
+- Startup log now includes feature states: `Features: EXIF=on, Sources=on, Duplicates=on`.
+
+### Changed — UI Layout
+
+- Replaced the inline source selection bar with the sidebar panel.
+- Moved the Quick Scan checkbox from the scan control bar into the sidebar as
+  "Duplicate Detection" (inverted logic — on = detection enabled).
+- Hardware info badge moved from the old source bar to the scan control bar.
+- Idle view text updated: "Configure your scan in the sidebar, then click Start Scan."
+- Duplicates tab empty state updated to reference the sidebar instead of Quick Scan mode.
+- Main window minimum width adjusts from 720px (sidebar hidden) to 940px (sidebar visible).
+
+### Changed — Project Configuration
+
+- `MARKETING_VERSION` bumped from `3.1` to `3.1.1`.
+- `CURRENT_PROJECT_VERSION` bumped from `5` to `6`.
+- Version display in header bar updated to "v3.1.1".
+
+---
+
 ## [3.1.0] — 2026-03-07
 
 ### Summary

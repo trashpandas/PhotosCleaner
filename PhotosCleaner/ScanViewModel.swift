@@ -83,6 +83,12 @@ class ScanViewModel: ObservableObject {
     /// Skip fingerprinting & duplicate detection for a faster scan.
     @Published var skipFingerprinting: Bool = false
 
+    // ── Feature Toggles (v3.1.1) ────────────────────────────────────────
+    /// Enable EXIF metadata extraction (Phase 2) and source classification (Phase 3).
+    @Published var enableEXIF: Bool = true
+    /// Enable source classification (Phase 3). Requires EXIF to be useful.
+    @Published var enableSourceClassification: Bool = true
+
     // ── Scan Log (v3.1) ─────────────────────────────────────────────────
     @Published var scanLog = [ScanLogEntry]()
     private let logLock = NSLock()
@@ -233,6 +239,7 @@ class ScanViewModel: ObservableObject {
         if scanFileSystem, let url = selectedFolderURL {
             appendLog("Source: Folder enabled — \(url.path)")
         }
+        appendLog("Features: EXIF=\(enableEXIF ? "on" : "off"), Sources=\(enableSourceClassification ? "on" : "off"), Duplicates=\(!skipFingerprinting ? "on" : "off")")
         appendLog("Hardware: \(HardwareAdaptor.description)")
 
         // Clear thumbnail cache for fresh scan
@@ -401,7 +408,32 @@ class ScanViewModel: ObservableObject {
             self?.statusMessage = "Phase 1/6 — Classified \(total.formatted()) photos."
         }
 
-        phase2ExtractEXIF(items: items, total: total)
+        // Check if EXIF is enabled (read on main thread)
+        let exifEnabled: Bool = {
+            var val = true
+            DispatchQueue.main.sync { [weak self] in val = self?.enableEXIF ?? true }
+            return val
+        }()
+
+        if exifEnabled {
+            phase2ExtractEXIF(items: items, total: total)
+        } else {
+            appendLog("[Phase 2] Skipped — EXIF extraction disabled")
+            appendLog("[Phase 3] Skipped — Source classification disabled")
+            // Jump to fingerprinting check
+            let skip: Bool = {
+                var val = false
+                DispatchQueue.main.sync { [weak self] in val = self?.skipFingerprinting ?? false }
+                return val
+            }()
+            if skip {
+                appendLog("[Phase 4] Skipped — Quick Scan mode")
+                appendLog("[Phase 5] Skipped — Quick Scan mode")
+                phaseFinalCategorize(items: items)
+            } else {
+                phase4GenerateFingerprints(items: items, total: total)
+            }
+        }
     }
 
     // ── Phase 2: EXIF Metadata Extraction ───────────────────────────────────
@@ -489,7 +521,32 @@ class ScanViewModel: ObservableObject {
         }
 
         appendLog("[Phase 2] Complete: EXIF extracted for \(total) photos")
-        phase3ClassifySources(items: updated, total: total)
+
+        // Check if source classification is enabled
+        let srcEnabled: Bool = {
+            var val = true
+            DispatchQueue.main.sync { [weak self] in val = self?.enableSourceClassification ?? true }
+            return val
+        }()
+
+        if srcEnabled {
+            phase3ClassifySources(items: updated, total: total)
+        } else {
+            appendLog("[Phase 3] Skipped — Source classification disabled")
+            // Jump to fingerprinting check
+            let skip: Bool = {
+                var val = false
+                DispatchQueue.main.sync { [weak self] in val = self?.skipFingerprinting ?? false }
+                return val
+            }()
+            if skip {
+                appendLog("[Phase 4] Skipped — Quick Scan mode")
+                appendLog("[Phase 5] Skipped — Quick Scan mode")
+                phaseFinalCategorize(items: updated)
+            } else {
+                phase4GenerateFingerprints(items: updated, total: total)
+            }
+        }
     }
 
     // ── Phase 3: Source Classification ───────────────────────────────────────

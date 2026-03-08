@@ -39,22 +39,34 @@ struct ContentView: View {
     // Tab selection
     @State private var selectedTab = "overview"
 
+    // Sidebar
+    @State private var showSidebar = true
+
     var body: some View {
         VStack(spacing: 0) {
             headerBar
             scanControlBar
-            sourceSelectionBar
             Divider()
 
-            if vm.scanPhase == .idle {
-                idleView
-            } else if vm.isScanning {
-                scanningView
-            } else {
-                resultsView
+            HStack(spacing: 0) {
+                // Collapsible sidebar
+                if showSidebar {
+                    configSidebar
+                        .frame(width: 220)
+                    Divider()
+                }
+
+                // Main content
+                if vm.scanPhase == .idle {
+                    idleView
+                } else if vm.isScanning {
+                    scanningView
+                } else {
+                    resultsView
+                }
             }
         }
-        .frame(minWidth: 720, idealWidth: 780, minHeight: 600, idealHeight: 680)
+        .frame(minWidth: showSidebar ? 940 : 720, idealWidth: showSidebar ? 1000 : 780, minHeight: 600, idealHeight: 680)
         .alert(alertTitle, isPresented: $showingAlert) {
             Button("OK", role: .cancel) {}
         } message: {
@@ -82,11 +94,23 @@ struct ContentView: View {
 
     var headerBar: some View {
         HStack {
+            Button {
+                withAnimation(.easeInOut(duration: 0.2)) {
+                    showSidebar.toggle()
+                }
+            } label: {
+                Image(systemName: "sidebar.left")
+                    .font(.body)
+                    .foregroundColor(Color.white.opacity(0.7))
+            }
+            .buttonStyle(.plain)
+            .help(showSidebar ? "Hide settings panel" : "Show settings panel")
+
             Label("Photos Library Cleaner", systemImage: "photo.stack.fill")
                 .font(.title3.bold())
                 .foregroundColor(.white)
             Spacer()
-            Text("v3.1")
+            Text("v3.1.1")
                 .font(.caption)
                 .foregroundColor(Color.white.opacity(0.5))
         }
@@ -119,15 +143,12 @@ struct ContentView: View {
                 .tint(.red)
             }
 
-            Toggle(isOn: $vm.skipFingerprinting) {
-                Label("Quick Scan", systemImage: "hare.fill")
-                    .font(.caption)
-            }
-            .toggleStyle(.checkbox)
-            .help("Skip duplicate detection for a faster scan")
-            .disabled(vm.isScanning)
-
             Spacer()
+
+            // Hardware info badge
+            Text(HardwareAdaptor.description)
+                .font(.caption2)
+                .foregroundColor(.secondary)
 
             if let err = vm.errorMessage {
                 HStack(spacing: 4) {
@@ -145,71 +166,135 @@ struct ContentView: View {
         .background(Color(NSColor.controlBackgroundColor))
     }
 
-    // MARK: - Source Selection Bar (v3)
+    // MARK: - Config Sidebar (v3.1.1)
 
-    var sourceSelectionBar: some View {
-        HStack(spacing: 16) {
-            Text("Scan Sources:")
-                .font(.caption.weight(.semibold))
-                .foregroundColor(.secondary)
+    var configSidebar: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
 
-            Toggle(isOn: $vm.scanPhotoKit) {
-                Label("Photos Library", systemImage: "photo.on.rectangle")
-                    .font(.caption)
-            }
-            .toggleStyle(.checkbox)
-            .disabled(vm.isScanning)
-
-            Divider()
-                .frame(height: 16)
-
-            Toggle(isOn: $vm.scanFileSystem) {
-                Label("Folder", systemImage: "folder")
-                    .font(.caption)
-            }
-            .toggleStyle(.checkbox)
-            .disabled(vm.isScanning)
-
-            if vm.scanFileSystem {
-                if let url = vm.selectedFolderURL {
-                    HStack(spacing: 6) {
-                        Image(systemName: "folder.fill")
-                            .foregroundColor(.blue)
-                            .font(.caption)
-                        Text(url.lastPathComponent)
-                            .font(.caption)
-                            .lineLimit(1)
-                            .help(url.path)
-                        Button {
-                            vm.selectedFolderURL = nil
-                            vm.scanFileSystem    = false
-                        } label: {
-                            Image(systemName: "xmark.circle.fill")
-                                .foregroundColor(.secondary)
-                                .font(.caption)
-                        }
-                        .buttonStyle(.plain)
-                        .disabled(vm.isScanning)
+                // ── Scan Sources ──────────────────────────
+                sidebarSection(title: "Scan Sources", icon: "externaldrive") {
+                    Toggle(isOn: $vm.scanPhotoKit) {
+                        Label("Photos Library", systemImage: "photo.on.rectangle")
                     }
-                } else {
-                    Button("Browse…") {
-                        pickFolder()
-                    }
-                    .font(.caption)
+                    .toggleStyle(.checkbox)
                     .disabled(vm.isScanning)
+
+                    Toggle(isOn: $vm.scanFileSystem) {
+                        Label("Folder", systemImage: "folder")
+                    }
+                    .toggleStyle(.checkbox)
+                    .disabled(vm.isScanning)
+
+                    if vm.scanFileSystem {
+                        if let url = vm.selectedFolderURL {
+                            HStack(spacing: 6) {
+                                Image(systemName: "folder.fill")
+                                    .foregroundColor(.blue)
+                                    .font(.caption)
+                                Text(url.lastPathComponent)
+                                    .font(.caption)
+                                    .lineLimit(1)
+                                    .help(url.path)
+                                Spacer()
+                                Button {
+                                    vm.selectedFolderURL = nil
+                                    vm.scanFileSystem    = false
+                                } label: {
+                                    Image(systemName: "xmark.circle.fill")
+                                        .foregroundColor(.secondary)
+                                        .font(.caption)
+                                }
+                                .buttonStyle(.plain)
+                                .disabled(vm.isScanning)
+                            }
+                            .padding(.leading, 20)
+                        } else {
+                            Button("Browse…") {
+                                pickFolder()
+                            }
+                            .font(.caption)
+                            .padding(.leading, 20)
+                            .disabled(vm.isScanning)
+                        }
+                    }
                 }
+
+                Divider()
+
+                // ── Analysis Features ──────────────────────
+                sidebarSection(title: "Analysis Features", icon: "gearshape.2") {
+                    Toggle(isOn: $vm.enableEXIF) {
+                        Label("EXIF Metadata", systemImage: "info.circle")
+                    }
+                    .toggleStyle(.checkbox)
+                    .disabled(vm.isScanning)
+                    .help("Extract camera, lens, GPS, and timestamp data from each photo")
+
+                    Toggle(isOn: $vm.enableSourceClassification) {
+                        Label("Source Classification", systemImage: "tag")
+                    }
+                    .toggleStyle(.checkbox)
+                    .disabled(vm.isScanning || !vm.enableEXIF)
+                    .help("Classify photos by source: camera, screenshot, web-saved, etc.")
+                    .onChange(of: vm.enableEXIF) { newValue in
+                        if !newValue {
+                            vm.enableSourceClassification = false
+                        }
+                    }
+
+                    Toggle(isOn: Binding(
+                        get: { !vm.skipFingerprinting },
+                        set: { vm.skipFingerprinting = !$0 }
+                    )) {
+                        Label("Duplicate Detection", systemImage: "doc.on.doc")
+                    }
+                    .toggleStyle(.checkbox)
+                    .disabled(vm.isScanning)
+                    .help("Generate perceptual fingerprints and find visually similar photos")
+                }
+
+                Divider()
+
+                // ── Scan Summary ──────────────────────────
+                sidebarSection(title: "Active Phases", icon: "list.number") {
+                    VStack(alignment: .leading, spacing: 4) {
+                        phaseIndicator("Basic Classification", active: true)
+                        phaseIndicator("EXIF Extraction", active: vm.enableEXIF)
+                        phaseIndicator("Source Classification", active: vm.enableEXIF && vm.enableSourceClassification)
+                        phaseIndicator("Fingerprinting", active: !vm.skipFingerprinting)
+                        phaseIndicator("Duplicate Detection", active: !vm.skipFingerprinting)
+                        phaseIndicator("Categorization", active: true)
+                    }
+                }
+
+                Spacer()
             }
-
-            Spacer()
-
-            // Hardware info badge
-            Text(HardwareAdaptor.description)
-                .font(.caption2)
-                .foregroundColor(.secondary)
+            .padding(12)
         }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 8)
-        .background(Color(NSColor.controlBackgroundColor).opacity(0.5))
+        .background(Color(NSColor.controlBackgroundColor).opacity(0.3))
+    }
+
+    func sidebarSection<Content: View>(title: String, icon: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label(title, systemImage: icon)
+                .font(.caption.weight(.bold))
+                .foregroundColor(.secondary)
+            content()
+                .font(.caption)
+        }
+    }
+
+    func phaseIndicator(_ name: String, active: Bool) -> some View {
+        HStack(spacing: 6) {
+            Image(systemName: active ? "checkmark.circle.fill" : "circle")
+                .foregroundColor(active ? .green : .secondary.opacity(0.4))
+                .font(.caption2)
+            Text(name)
+                .font(.caption2)
+                .foregroundColor(active ? .primary : .secondary.opacity(0.5))
+                .strikethrough(!active, color: .secondary.opacity(0.3))
+        }
     }
 
     // MARK: - Folder Picker
@@ -241,7 +326,7 @@ struct ContentView: View {
                 .font(.subheadline)
                 .foregroundColor(.secondary)
                 .multilineTextAlignment(.center)
-            Text("Select your sources above, then click Start Scan.")
+            Text("Configure your scan in the sidebar, then click Start Scan.")
                 .font(.caption)
                 .foregroundColor(.secondary)
             Spacer()
@@ -496,11 +581,11 @@ struct ContentView: View {
             VStack(spacing: 12) {
                 if vm.duplicateGroups.isEmpty {
                     VStack(spacing: 12) {
-                        Image(systemName: vm.skipFingerprinting ? "hare.fill" : "checkmark.seal.fill")
+                        Image(systemName: vm.skipFingerprinting ? "gearshape.2" : "checkmark.seal.fill")
                             .font(.system(size: 40))
                             .foregroundColor(.secondary)
                         Text(vm.skipFingerprinting
-                             ? "Duplicate detection was skipped (Quick Scan mode).\nRun a full scan to detect duplicates."
+                             ? "Duplicate detection was disabled.\nEnable it in the sidebar and run a full scan."
                              : "No duplicate photos found!")
                             .font(.subheadline)
                             .foregroundColor(.secondary)
